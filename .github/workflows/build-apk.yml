@@ -1,0 +1,658 @@
+          # Anime Partner — build the Android APK on GitHub. ONE FILE, nothing else needed.
+#
+# Put this at exactly:  .github/workflows/build-apk.yml
+#   (leading dot, all lowercase — "GitHub/workflows" is NOT read by GitHub)
+#
+# The repository only needs the two files it already has:
+#   index.html      the whole app
+#   icon-512.png    used to generate every launcher icon
+#
+# Everything else — the Android project, the WebView shell, the Japanese speech
+# bridge and the signing key — is written out by this workflow at build time.
+#
+#   Actions tab -> Build APK -> Run workflow
+#   Artifacts   -> anime-partner-apk   (download, unzip, install)
+#   Releases    -> the same APK, one-click download link
+#
+# Before each new build raise versionCode below (146, 147, ...), otherwise
+# Android ignores the new file and nothing appears to change on the phone.
+
+name: Build APK
+
+on:
+  workflow_dispatch:
+  push:
+    paths:
+      - 'index.html'
+      - '.github/workflows/build-apk.yml'
+
+permissions:
+  contents: write
+
+concurrency:
+  group: build-apk
+  cancel-in-progress: true
+
+env:
+  VERSION_NAME: '1.43'
+  VERSION_CODE: '146'
+
+jobs:
+  apk:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Check out the repository
+        uses: actions/checkout@v4
+
+      - name: Check the two required files are present
+        run: |
+          test -f index.html   || { echo "::error::index.html must be in the repository root"; exit 1; }
+          test -f icon-512.png || { echo "::error::icon-512.png must be in the repository root"; exit 1; }
+          ls -l index.html icon-512.png
+
+      - name: Set up JDK 17
+        uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: '17'
+
+      - name: Set up the Android SDK
+        uses: android-actions/setup-android@v3
+
+      - name: Install build-tools 34 and platform 34
+        run: sdkmanager --install "build-tools;34.0.0" "platforms;android-34"
+
+      - name: Write the Android project
+        run: |
+          set -e
+          mkdir -p app/src/com/shin/animepartner app/res/values app/res/mipmap-anydpi-v26 app/assets
+
+          cat > app/AndroidManifest.xml <<'ANDROID_MANIFEST_EOF'
+          <?xml version="1.0" encoding="utf-8"?>
+          <manifest xmlns:android="http://schemas.android.com/apk/res/android"
+              package="com.shin.animepartner"
+              android:versionCode="145"
+              android:versionName="1.43">
+            <uses-permission android:name="android.permission.INTERNET" />
+            <uses-permission android:name="android.permission.WRITE_EXTERNAL_STORAGE" android:maxSdkVersion="28" />
+            <application
+                android:label="Anime Partner"
+                android:icon="@mipmap/ic_launcher"
+                android:roundIcon="@mipmap/ic_launcher"
+                android:hardwareAccelerated="true"
+                android:usesCleartextTraffic="false"
+                android:allowBackup="true"
+                android:supportsRtl="true"
+                android:theme="@style/AppTheme">
+              <activity
+                  android:name=".MainActivity"
+                  android:exported="true"
+                  android:configChanges="orientation|screenSize|keyboardHidden|uiMode|smallestScreenSize|screenLayout"
+                  android:windowSoftInputMode="adjustResize"
+                  android:launchMode="singleTask">
+                <intent-filter>
+                  <action android:name="android.intent.action.MAIN" />
+                  <category android:name="android.intent.category.LAUNCHER" />
+                </intent-filter>
+              </activity>
+            </application>
+          </manifest>
+          ANDROID_MANIFEST_EOF
+          sed -i "s|android:versionCode=\"[0-9]*\"|android:versionCode=\"$VERSION_CODE\"|" app/AndroidManifest.xml
+          sed -i "s|android:versionName=\"[^\"]*\"|android:versionName=\"$VERSION_NAME\"|" app/AndroidManifest.xml
+
+          cat > app/src/com/shin/animepartner/MainActivity.java <<'MAIN_ACTIVITY_EOF'
+          package com.shin.animepartner;
+
+          import android.annotation.SuppressLint;
+          import android.app.Activity;
+          import android.content.ContentValues;
+          import android.content.Intent;
+          import android.net.Uri;
+          import android.os.Build;
+          import android.os.Bundle;
+          import android.os.Environment;
+          import android.provider.MediaStore;
+          import android.util.Base64;
+          import android.webkit.DownloadListener;
+          import android.webkit.JavascriptInterface;
+          import android.widget.Toast;
+
+          import android.speech.tts.TextToSpeech;
+
+          import java.io.File;
+          import java.io.FileOutputStream;
+          import java.io.OutputStream;
+          import java.util.Locale;
+          import android.view.View;
+          import android.view.ViewGroup;
+          import android.webkit.PermissionRequest;
+          import android.webkit.WebChromeClient;
+          import android.webkit.WebResourceRequest;
+          import android.webkit.WebSettings;
+          import android.webkit.WebView;
+          import android.webkit.WebViewClient;
+
+          /**
+           * Anime Partner — Android shell.
+           *
+           * The whole app is one HTML file in assets, so this activity is deliberately
+           * thin: create a WebView, let it keep its own storage, and hand any link that
+           * points away from the app to the real browser. Nothing is added to the app
+           * itself; the APK is the same web app, installed instead of bookmarked.
+           *
+           * Developed by Shin. Copyright reserved.
+           */
+          public class MainActivity extends Activity {
+
+            private WebView web;
+            private TextToSpeech tts;
+            private volatile boolean ttsReady = false;
+            private volatile boolean japaneseOk = false;
+
+            @SuppressLint("SetJavaScriptEnabled")
+            @Override
+            protected void onCreate(Bundle saved) {
+              super.onCreate(saved);
+
+              web = new WebView(this);
+              web.setLayoutParams(new ViewGroup.LayoutParams(
+                  ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.MATCH_PARENT));
+              web.setBackgroundColor(0xFF0B0D12);
+
+              WebSettings s = web.getSettings();
+              s.setJavaScriptEnabled(true);
+              s.setDomStorageEnabled(true);          // localStorage — the app's whole state
+              s.setDatabaseEnabled(true);
+              s.setMediaPlaybackRequiresUserGesture(true);
+              s.setLoadWithOverviewMode(true);
+              s.setUseWideViewPort(true);
+              s.setSupportZoom(false);
+              s.setAllowFileAccess(false);
+              s.setAllowContentAccess(false);
+              s.setCacheMode(WebSettings.LOAD_DEFAULT);
+              if (Build.VERSION.SDK_INT >= 21) {
+                s.setMixedContentMode(WebSettings.MIXED_CONTENT_NEVER_ALLOW);
+              }
+
+              web.setWebViewClient(new WebViewClient() {
+                /* Anything that is not the bundled page — a streaming service, an
+                   Instagram profile, a YouTube video — belongs in the browser, not
+                   inside this shell. */
+                @Override
+                public boolean shouldOverrideUrlLoading(WebView view, WebResourceRequest req) {
+                  return openOutside(req.getUrl());
+                }
+
+                @Override
+                @SuppressWarnings("deprecation")
+                public boolean shouldOverrideUrlLoading(WebView view, String url) {
+                  return openOutside(Uri.parse(url));
+                }
+
+                private boolean openOutside(Uri uri) {
+                  String sc = uri.getScheme() == null ? "" : uri.getScheme();
+                  if (sc.equals("file")) return false;         // the app itself
+                  try {
+                    startActivity(new Intent(Intent.ACTION_VIEW, uri));
+                  } catch (Exception ignored) {
+                    return false;
+                  }
+                  return true;
+                }
+              });
+
+              web.setWebChromeClient(new WebChromeClient() {
+                /* Android's WebView has no speech recogniser, so the only thing that
+                   could ask for a microphone here is something we did not ship.
+                   Deny it and let the app fall back to shadowing practice, which it
+                   already does properly. */
+                @Override
+                public void onPermissionRequest(final PermissionRequest request) {
+                  runOnUiThread(new Runnable() {
+                    @Override public void run() { request.deny(); }
+                  });
+                }
+              });
+
+              /* The app writes two real files — the calendar reminder and the backup
+                 JSON — with a blob URL and an anchor click. A bare WebView ignores
+                 both, so the feature would look like it worked and leave nothing on
+                 the phone. This reads the blob back through JavaScript and writes it
+                 to the Downloads folder itself. */
+              web.addJavascriptInterface(new FileBridge(), "AndroidFiles");
+
+              /* Android's WebView ships no Web Speech API, so the Japanese lessons —
+                 "Hear it", "Read aloud", every pronunciation button — stay silent
+                 inside the APK even though they work in Chrome. The phone does have a
+                 speech engine, it is just not wired to the WebView. This hands the
+                 system TextToSpeech to the page; a small shim in the bundled HTML
+                 presents it as window.speechSynthesis, so the web app needs no
+                 Android-specific code of its own. */
+              tts = new TextToSpeech(this, new TextToSpeech.OnInitListener() {
+                @Override
+                public void onInit(int status) {
+                  if (status != TextToSpeech.SUCCESS) return;
+                  ttsReady = true;
+                  try {
+                    int ja = tts.isLanguageAvailable(Locale.JAPANESE);
+                    japaneseOk = (ja == TextToSpeech.LANG_AVAILABLE
+                               || ja == TextToSpeech.LANG_COUNTRY_AVAILABLE
+                               || ja == TextToSpeech.LANG_COUNTRY_VAR_AVAILABLE);
+                  } catch (Exception ignored) { japaneseOk = false; }
+                }
+              });
+              web.addJavascriptInterface(new SpeechBridge(), "AndroidTTS");
+              web.setDownloadListener(new DownloadListener() {
+                @Override
+                public void onDownloadStart(String url, String agent, String disp, String mime, long size) {
+                  if (url != null && url.startsWith("blob:")) {
+                    web.evaluateJavascript(blobReader(url, mime), null);
+                    return;
+                  }
+                  try {
+                    startActivity(new Intent(Intent.ACTION_VIEW, Uri.parse(url)));
+                  } catch (Exception e) {
+                    toast("Could not open that download");
+                  }
+                }
+              });
+
+              setContentView(web);
+              hideBars();
+
+              if (saved != null) web.restoreState(saved);
+              else web.loadUrl("file:///android_asset/index.html");
+            }
+
+            /** Pulls a blob back into JavaScript as base64 and hands it to the app. */
+            private static String blobReader(String url, String mime) {
+              return "(function(){var x=new XMLHttpRequest();x.open('GET','" + url + "',true);"
+                  + "x.responseType='blob';x.onload=function(){var r=new FileReader();"
+                  + "r.onloadend=function(){AndroidFiles.save(r.result,'" + (mime == null ? "" : mime) + "');};"
+                  + "r.readAsDataURL(x.response);};x.send();})()";
+            }
+
+            /** Writes what the page produced into the phone's Downloads folder. */
+            private class FileBridge {
+              @JavascriptInterface
+              public void save(String dataUrl, String mime) {
+                try {
+                  int comma = dataUrl.indexOf(',');
+                  byte[] bytes = Base64.decode(dataUrl.substring(comma + 1), Base64.DEFAULT);
+                  String ext = mime != null && mime.contains("calendar") ? ".ics" : ".json";
+                  String name = "anime-partner-" + System.currentTimeMillis() + ext;
+                  String where;
+                  if (Build.VERSION.SDK_INT >= 29) {
+                    ContentValues v = new ContentValues();
+                    v.put(MediaStore.Downloads.DISPLAY_NAME, name);
+                    v.put(MediaStore.Downloads.MIME_TYPE, mime == null || mime.isEmpty() ? "application/octet-stream" : mime);
+                    Uri out = getContentResolver().insert(MediaStore.Downloads.EXTERNAL_CONTENT_URI, v);
+                    OutputStream os = getContentResolver().openOutputStream(out);
+                    os.write(bytes);
+                    os.close();
+                    where = "Downloads/" + name;
+                  } else {
+                    File dir = Environment.getExternalStoragePublicDirectory(Environment.DIRECTORY_DOWNLOADS);
+                    if (!dir.exists()) dir.mkdirs();
+                    File f = new File(dir, name);
+                    FileOutputStream fo = new FileOutputStream(f);
+                    fo.write(bytes);
+                    fo.close();
+                    where = f.getAbsolutePath();
+                  }
+                  toast("Saved to " + where);
+                } catch (Exception e) {
+                  toast("Could not save the file");
+                }
+              }
+            }
+
+            /** The phone's own speech engine, exposed to the page as window.speechSynthesis. */
+            private class SpeechBridge {
+              /** "ready|japanese" — the page decides what to tell the user from this. */
+              @JavascriptInterface
+              public String status() {
+                return (ttsReady ? "1" : "0") + "|" + (japaneseOk ? "1" : "0");
+              }
+
+              @JavascriptInterface
+              public void speak(final String text, final String lang, final float rate, final float volume) {
+                if (!ttsReady || text == null || text.length() == 0) return;
+                runOnUiThread(new Runnable() {
+                  @Override
+                  public void run() {
+                    try {
+                      Locale want = (lang != null && lang.toLowerCase(Locale.US).startsWith("ja"))
+                          ? Locale.JAPANESE : Locale.getDefault();
+                      tts.setLanguage(want);
+                      tts.setSpeechRate(rate > 0 ? rate : 1f);
+                      String id = "ap-" + System.currentTimeMillis();
+                      if (Build.VERSION.SDK_INT >= 21) {
+                        android.os.Bundle params = new android.os.Bundle();
+                        params.putFloat(TextToSpeech.Engine.KEY_PARAM_VOLUME, volume <= 0 ? 1f : Math.min(1f, volume));
+                        tts.speak(text, TextToSpeech.QUEUE_FLUSH, params, id);
+                      } else {
+                        tts.speak(text, TextToSpeech.QUEUE_FLUSH, null);
+                      }
+                    } catch (Exception ignored) { }
+                  }
+                });
+              }
+
+              @JavascriptInterface
+              public void stop() {
+                runOnUiThread(new Runnable() {
+                  @Override public void run() { try { if (tts != null) tts.stop(); } catch (Exception ignored) { } }
+                });
+              }
+            }
+
+            private void toast(final String msg) {
+              runOnUiThread(new Runnable() {
+                @Override public void run() { Toast.makeText(MainActivity.this, msg, Toast.LENGTH_LONG).show(); }
+              });
+            }
+
+            private void hideBars() {
+              if (Build.VERSION.SDK_INT >= 19) {
+                getWindow().getDecorView().setSystemUiVisibility(
+                    View.SYSTEM_UI_FLAG_LAYOUT_STABLE | View.SYSTEM_UI_FLAG_LAYOUT_FULLSCREEN);
+              }
+            }
+
+            @Override
+            protected void onSaveInstanceState(Bundle out) {
+              super.onSaveInstanceState(out);
+              web.saveState(out);
+            }
+
+            /** Back goes back through the app's own screens before leaving it. */
+            @Override
+            public void onBackPressed() {
+              if (web != null && web.canGoBack()) web.goBack();
+              else super.onBackPressed();
+            }
+
+            @Override protected void onPause() { if (web != null) web.onPause(); if (tts != null) tts.stop(); super.onPause(); }
+            @Override protected void onResume() { super.onResume(); if (web != null) web.onResume(); }
+
+            @Override
+            protected void onDestroy() {
+              if (tts != null) { try { tts.stop(); tts.shutdown(); } catch (Exception ignored) { } tts = null; }
+              super.onDestroy();
+            }
+          }
+          MAIN_ACTIVITY_EOF
+
+          cat > app/apk-bridge.js <<'APK_BRIDGE_EOF'
+          /* Anime Partner — APK-only shim. Injected into the copy of index.html that is
+             bundled inside the Android app; the web build never sees it.
+
+             Android's WebView implements no Web Speech API, so every pronunciation
+             button in the Japanese lessons is silent inside the APK while working fine
+             in Chrome. The phone's own speech engine is handed over by MainActivity as
+             `AndroidTTS`; this presents it to the page as a normal `speechSynthesis`
+             object, so js/core/tts.js keeps working untouched. */
+          (function () {
+            if (typeof window === 'undefined' || !window.AndroidTTS) return;   // not inside the APK
+
+            var st = '0|0';
+            try { st = String(window.AndroidTTS.status() || '0|0'); } catch (e) { return; }
+            var ready = st.charAt(0) === '1';
+            var hasJa = st.charAt(2) === '1';
+
+            function Utterance(text) {
+              this.text = text == null ? '' : String(text);
+              this.lang = 'ja-JP';
+              this.rate = 1; this.pitch = 1; this.volume = 1;
+              this.voice = null;
+              this.onstart = null; this.onend = null; this.onerror = null;
+            }
+
+            function voiceList() {
+              var out = [];
+              if (hasJa) out.push({ name: 'Android speech engine', lang: 'ja-JP', voiceURI: 'android-ja', localService: true, 'default': true });
+              out.push({ name: 'Android speech engine', lang: (navigator.language || 'en-US'), voiceURI: 'android-default', localService: true, 'default': !hasJa });
+              return out;
+            }
+
+            var listeners = {};
+            var synth = {
+              speaking: false, pending: false, paused: false,
+              getVoices: function () { return ready ? voiceList() : []; },
+              speak: function (u) {
+                if (!u) return;
+                var text = String(u.text == null ? u : u.text);
+                var lang = String(u.lang || 'ja-JP');
+                var rate = Number(u.rate) > 0 ? Number(u.rate) : 1;
+                var vol = u.volume == null ? 1 : Number(u.volume);
+                try {
+                  window.AndroidTTS.speak(text, lang, rate, vol);
+                  synth.speaking = true;
+                  if (typeof u.onstart === 'function') { try { u.onstart({ type: 'start' }); } catch (e) {} }
+                  // The engine speaks on its own thread; approximate the end so UI state resets.
+                  var ms = Math.max(700, Math.round((text.length / Math.max(0.4, rate)) * 110));
+                  clearTimeout(synth._t);
+                  synth._t = setTimeout(function () {
+                    synth.speaking = false;
+                    if (typeof u.onend === 'function') { try { u.onend({ type: 'end' }); } catch (e) {} }
+                  }, ms);
+                } catch (e) {
+                  synth.speaking = false;
+                  if (typeof u.onerror === 'function') { try { u.onerror({ type: 'error', error: String(e) }); } catch (e2) {} }
+                }
+              },
+              cancel: function () {
+                clearTimeout(synth._t);
+                synth.speaking = false;
+                try { window.AndroidTTS.stop(); } catch (e) {}
+              },
+              pause: function () { synth.cancel(); },
+              resume: function () {},
+              addEventListener: function (type, fn) { (listeners[type] = listeners[type] || []).push(fn); },
+              removeEventListener: function (type, fn) {
+                var a = listeners[type] || []; var i = a.indexOf(fn); if (i >= 0) a.splice(i, 1);
+              },
+              dispatchEvent: function () { return true; }
+            };
+
+            try {
+              Object.defineProperty(window, 'speechSynthesis', { value: synth, configurable: true, writable: false });
+            } catch (e) {
+              window.speechSynthesis = synth;
+            }
+            window.SpeechSynthesisUtterance = Utterance;
+            window.__AP_NATIVE_TTS__ = { ready: ready, japanese: hasJa };
+
+            // Voices exist from the first moment here, but fire the event the page listens for anyway.
+            setTimeout(function () {
+              (listeners['voiceschanged'] || []).forEach(function (fn) { try { fn({ type: 'voiceschanged' }); } catch (e) {} });
+            }, 0);
+          })();
+          APK_BRIDGE_EOF
+
+          cat > app/res/values/strings.xml <<'STRINGS_EOF'
+          <?xml version="1.0" encoding="utf-8"?>
+          <resources>
+            <string name="app_name">Anime Partner</string>
+          </resources>
+          STRINGS_EOF
+
+          cat > app/res/values/styles.xml <<'STYLES_EOF'
+          <?xml version="1.0" encoding="utf-8"?>
+          <resources>
+            <style name="AppTheme" parent="@android:style/Theme.Material.NoActionBar">
+              <item name="android:windowBackground">@android:color/black</item>
+              <item name="android:statusBarColor">#0B0D12</item>
+              <item name="android:navigationBarColor">#0B0D12</item>
+            </style>
+          </resources>
+          STYLES_EOF
+
+          cat > app/res/mipmap-anydpi-v26/ic_launcher.xml <<'ADAPTIVE_EOF'
+          <?xml version="1.0" encoding="utf-8"?>
+          <adaptive-icon xmlns:android="http://schemas.android.com/apk/res/android">
+            <background android:drawable="@mipmap/ic_launcher_background" />
+            <foreground android:drawable="@mipmap/ic_launcher_foreground" />
+          </adaptive-icon>
+          ADAPTIVE_EOF
+          echo "project written"
+
+      - name: Generate the launcher icons from icon-512.png
+        run: |
+          python3 -m pip install --quiet --disable-pip-version-check pillow numpy
+          cd app
+          SRC=../icon-512.png python3 - <<'ICONS_EOF'
+          import os
+          SRC = os.environ["SRC"]
+          from PIL import Image, ImageDraw, ImageFilter
+          import os
+          src = Image.open(SRC).convert("RGB")
+          DENS = {"mdpi":48,"hdpi":72,"xhdpi":96,"xxhdpi":144,"xxxhdpi":192}
+          FG   = {"mdpi":108,"hdpi":162,"xhdpi":216,"xxhdpi":324,"xxxhdpi":432}
+
+          def mark(px):
+              S = 4                                    # supersample for clean edges
+              w = px * S
+              im = Image.new("RGBA", (w, w), (0, 0, 0, 0))
+              d = ImageDraw.Draw(im)
+              c = w / 2
+              R = w * 0.255                            # ring radius  -> diameter 51% (inside the 66% safe zone)
+              t = int(w * 0.045)
+              d.ellipse([c - R, c - R, c + R, c + R], outline=(255, 255, 255, 255), width=t)
+              # play triangle with rounded corners: fill the polygon, then stroke its edges round-capped
+              a = w * 0.115
+              p = [(c - a * 0.78, c - a), (c - a * 0.78, c + a), (c + a * 0.92, c)]
+              r = int(w * 0.055)
+              d.polygon(p, fill=(255, 255, 255, 255))
+              for i in range(3):
+                  d.line([p[i], p[(i + 1) % 3]], fill=(255, 255, 255, 255), width=r, joint="curve")
+              for x, y in p:
+                  d.ellipse([x - r / 2, y - r / 2, x + r / 2, y + r / 2], fill=(255, 255, 255, 255))
+              # four-point sparkle, upper right
+              sx, sy, s = c + w * 0.105, c - w * 0.105, w * 0.052
+              d.polygon([(sx, sy - s), (sx + s * 0.30, sy - s * 0.30), (sx + s, sy),
+                         (sx + s * 0.30, sy + s * 0.30), (sx, sy + s), (sx - s * 0.30, sy + s * 0.30),
+                         (sx - s, sy), (sx - s * 0.30, sy - s * 0.30)], fill=(255, 255, 255, 255))
+              return im.resize((px, px), Image.LANCZOS)
+
+          for d, px in DENS.items():
+              os.makedirs("res/mipmap-" + d, exist_ok=True)
+              src.resize((px, px), Image.LANCZOS).save("res/mipmap-%s/ic_launcher.png" % d)
+          for d, px in FG.items():
+              mark(px).save("res/mipmap-%s/ic_launcher_foreground.png" % d)
+              src.resize((px, px), Image.LANCZOS).filter(ImageFilter.GaussianBlur(px * 0.22)) \
+                 .save("res/mipmap-%s/ic_launcher_background.png" % d)
+          print("icons generated from", SRC)
+          ICONS_EOF
+
+      - name: Bundle the app and inject the speech bridge
+        run: |
+          cd app
+          cp -f ../index.html assets/index.html
+          python3 - <<'INJECT_EOF'
+          # Android's WebView has no Web Speech API, so the Japanese pronunciation
+          # buttons would be silent. MainActivity exposes the phone's TextToSpeech as
+          # AndroidTTS; this shim presents it to the page as window.speechSynthesis.
+          html = open('assets/index.html', encoding='utf-8').read()
+          shim = open('apk-bridge.js', encoding='utf-8').read()
+          assert '<head>' in html, 'no <head> found in index.html'
+          if 'apk-bridge' not in html:
+              html = html.replace('<head>', '<head>\n<script>/* apk-bridge */\n' + shim + '\n</script>', 1)
+              open('assets/index.html', 'w', encoding='utf-8').write(html)
+              print('speech bridge injected:', len(shim), 'bytes')
+          else:
+              print('bridge already present, skipped')
+          INJECT_EOF
+
+      - name: Write the signing key
+        env:
+          KEYSTORE_B64: ${{ secrets.ANDROID_KEYSTORE_B64 }}
+        run: |
+          set -e
+          if [ -n "$KEYSTORE_B64" ]; then
+            printf '%s' "$KEYSTORE_B64" | base64 -d > "$RUNNER_TEMP/keystore.p12"
+            echo "Using the keystore from the repository secret."
+          else
+            cat > "$RUNNER_TEMP/ks.b64" <<'KEYSTORE_EOF'
+            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
+          KEYSTORE_EOF
+            tr -d '\n ' < "$RUNNER_TEMP/ks.b64" | base64 -d > "$RUNNER_TEMP/keystore.p12"
+            echo "Using the built-in signing key (same one as every earlier Anime Partner APK)."
+          fi
+          ls -l "$RUNNER_TEMP/keystore.p12"
+          - name: Compile, package and sign
+        id: build
+        run: |
+          set -e
+          BT="$ANDROID_HOME/build-tools/34.0.0"
+          AJ="$ANDROID_HOME/platforms/android-34/android.jar"
+          KS="$RUNNER_TEMP/keystore.p12"
+          cd app
+          rm -rf build && mkdir -p build/compiled build/gen build/classes build/pack
+
+          "$BT/aapt2" compile --dir res -o build/compiled/res.zip
+          "$BT/aapt2" link -o build/base.apk -I "$AJ" --manifest AndroidManifest.xml \
+            -R build/compiled/res.zip --java build/gen --auto-add-overlay \
+            --min-sdk-version 21 --target-sdk-version 34
+
+          javac -nowarn -encoding UTF-8 -source 8 -target 8 -bootclasspath "$AJ" -classpath "$AJ" \
+            -d build/classes $(find src build/gen -name "*.java")
+          "$BT/d8" --min-api 21 --output build/ $(find build/classes -name "*.class")
+
+          cp build/base.apk build/unsigned.apk
+          cp build/classes.dex build/pack/
+          cp -r assets build/pack/
+          (cd build/pack && zip -q -X -r ../unsigned.apk classes.dex assets)
+
+          "$BT/zipalign" -p -f 4 build/unsigned.apk build/aligned.apk
+          "$BT/apksigner" sign --ks "$KS" --ks-pass pass:animepartner --key-pass pass:animepartner \
+            --ks-key-alias animepartner --out ../anime-partner.apk build/aligned.apk
+          "$BT/apksigner" verify --verbose ../anime-partner.apk
+          cd ..
+          cp anime-partner.apk "anime-partner-v$VERSION_NAME-$VERSION_CODE.apk"
+          echo "tag=v$VERSION_NAME+$VERSION_CODE" >> "$GITHUB_OUTPUT"
+          ls -l anime-partner*.apk
+
+      - name: Upload the APK to Artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: anime-partner-apk
+          path: anime-partner*.apk
+          retention-days: 90
+          if-no-files-found: error
+
+      - name: Publish a Release with the APK
+        continue-on-error: true
+        env:
+          GH_TOKEN: ${{ github.token }}
+          TAG: ${{ steps.build.outputs.tag }}
+        run: |
+          NOTES="Android APK, signed. The same build that is live on the website.
+
+          * Works offline after the first open. No account, no ads, nothing leaves your device.
+          * Japanese pronunciation plays through the phone's own speech engine.
+          * Android 5.0 (API 21) and newer.
+
+          Install: download anime-partner.apk, open it, allow \"Install unknown apps\" once.
+          Installing over an older copy keeps your library, coins and streak.
+
+          Developed by Shin."
+          if gh release view "$TAG" >/dev/null 2>&1; then
+            gh release upload "$TAG" anime-partner.apk --clobber
+          else
+            gh release create "$TAG" anime-partner.apk \
+              --title "Anime Partner $VERSION_NAME (build $VERSION_CODE)" --notes "$NOTES" --latest
+          fi
+
+      - name: Where to find the APK
+        run: |
+          {
+            echo "### APK ready"
+            echo ""
+            echo "* **Artifacts** at the bottom of this page: \`anime-partner-apk\`"
+            echo "* **Releases**: ${{ steps.build.outputs.tag }}"
+            echo "* Version $VERSION_NAME (build $VERSION_CODE)"
+          } >> "$GITHUB_STEP_SUMMARY"
+          
