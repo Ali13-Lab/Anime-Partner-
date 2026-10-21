@@ -13,8 +13,8 @@ permissions:
   contents: write
 
 env:
-  VERSION_NAME: '1.43.1'
-  VERSION_CODE: '147'
+  VERSION_NAME: '1.43.2'
+  VERSION_CODE: '148'
 
 jobs:
   apk:
