@@ -38,10 +38,11 @@ jobs:
           mv android-14 build-tools/34.0.0
           mv android-34 platforms/android-34
           echo "ANDROID_HOME=$HOME/sdk" >> "$GITHUB_ENV"
-
       - name: Unpack the Android project
         run: |
-          tar xzf android-project.tgz || unzip -q -o android-project.zip
+          f=$(ls android-project*.zip android-project*.tgz 2>/dev/null | head -1)
+          echo "using $f"
+          tar xzf "$f" 2>/dev/null || unzip -q -o "$f"
           sed -i '/cloudflareinsights/d' index.html
 
       - name: Build and sign the APK
