@@ -6,6 +6,7 @@ on:
     paths:
       - 'index.html'
       - 'android-project.tgz'
+      - 'android-project.zip'
       - '.github/workflows/build-apk.yml'
 
 permissions:
@@ -19,20 +20,29 @@ jobs:
   apk:
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v5
 
-      - uses: actions/setup-java@v4
+      - uses: actions/setup-java@v5
         with:
           distribution: temurin
           java-version: '17'
 
-      - uses: android-actions/setup-android@v3
-
-      - name: Install Android build tools
-        run: sdkmanager --install "build-tools;34.0.0" "platforms;android-34"
+      - name: Android SDK
+        run: |
+          mkdir -p "$HOME/sdk/build-tools" "$HOME/sdk/platforms"
+          cd "$HOME/sdk"
+          curl -sL -o bt.zip https://dl.google.com/android/repository/build-tools_r34-linux.zip
+          curl -sL -o pl.zip https://dl.google.com/android/repository/platform-34-ext7_r03.zip
+          unzip -q bt.zip
+          unzip -q pl.zip
+          mv android-14 build-tools/34.0.0
+          mv android-34 platforms/android-34
+          echo "ANDROID_HOME=$HOME/sdk" >> "$GITHUB_ENV"
 
       - name: Unpack the Android project
-        run: tar xzf android-project.tgz
+        run: |
+          tar xzf android-project.tgz || unzip -q -o android-project.zip
+          sed -i '/cloudflareinsights/d' index.html
 
       - name: Build and sign the APK
         id: build
@@ -55,6 +65,5 @@ jobs:
         run: |
           gh release create "${{ steps.build.outputs.tag }}" anime-partner.apk \
             --title "${{ steps.build.outputs.title }}" --latest \
-            --notes "Android APK, signed. Works offline after the first open. No account, no ads. Android 5.0 and newer. Installing over an older copy keeps your library, coins and streak. Developed by Shin." \
+            --notes "Android APK, signed. Works offline after the first open. No account, no ads. Android 5.0 and newer. Developed by Shin." \
           || gh release upload "${{ steps.build.outputs.tag }}" anime-partner.apk --clobber
-          
