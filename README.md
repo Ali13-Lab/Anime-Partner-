@@ -2,7 +2,9 @@
 
 Your personal anime companion — tracker, recommendations, Japanese lessons, games and a daily routine. One file, no account, works offline.
 
-**[▶ Open the app](https://SHIN.github.io/anime-partner/)** · **[⬇ Download the Android app (APK)](https://SHIN.github.io/anime-partner/anime-partner.apk)**
+**[▶ Open the app](https://SHIN.github.io/anime-partner/)** · **
+https://github.com/Ali13-Lab/Anime-Partner-/releases/tag/v1.43.2%2B148
+
 
 
 ---
