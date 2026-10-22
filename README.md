@@ -11,7 +11,7 @@ https://github.com/Ali13-Lab/Anime-Partner-/releases/tag/v1.43.2%2B148
 
 ## What it is
 
-Anime Partner is a single HTML file. Open it and it runs: there is no sign-up, no server, no analytics, and nothing is uploaded anywhere. Everything you do — the titles you track, the episodes you tick off, your scores, your Japanese progress, your coins — is stored by your own browser, on your own device.
+
 
 - **Tracker** — 1,470 bundled titles, episode-by-episode progress, seasons grouped into the show they belong to, six scoring scales, custom lists, notes, rewatch counts, start and finish dates, a stats page and a MAL-compatible export.
 - **Recommendations** — built from your own ratings and lists by rules you can read, each with a short line saying *why*. No hidden profiling, nothing promoted.
